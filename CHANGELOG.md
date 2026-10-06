@@ -1,5 +1,6 @@
 ### 2.13.1 (Unreleased)
 ### Fixes
+* Stop ordinary code comparisons after removal verbs from causing false incomplete inspection while retaining real and ambiguous tag-marker directives. (#777)
 * Preserve Python and Perl host-language ownership when checking embedded shell text, so ordinary regexes, quoted script text, and report strings do not falsely exhaust the shell parser. (#778, #784, #849)
 * Recognize possessive Markdown prose without weakening inspection of executable shell text. (#849)
 * Retain incomplete inspection when report-shaped strings can reach recognized shell execution, including through bundled helpers or module initialization.
