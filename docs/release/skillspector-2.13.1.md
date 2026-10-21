@@ -10,9 +10,20 @@ reporting for failed batch gap-fill passes, and bounded tool-misuse context and
 deadlines. Five are analyzer, report and CLI fixes: TM1 repeated assignments,
 MP3 hardware reset states and state adoption, recursive MEDIUM recommendations,
 and rejection of unsupported recursive and registry option combinations.
+Two further customer fixes prevent ordinary code comparisons from causing
+incomplete inspection and credential-type disclosures from producing false
+credential-access findings. The release includes 14 selected upstream PRs.
 
 ## Selected changes
 
+- [#777](https://github.com/NVIDIA/SkillSpector/pull/777) keeps comparisons
+  such as `len(value.strip()) < 12` from being read as an unfinished tag-removal
+  instruction. Real tag directives, including ones after a comparison, retain
+  their existing detection and incomplete-inspection safeguards.
+- [#827](https://github.com/NVIDIA/SkillSpector/pull/827) recognizes access
+  credential nouns inside a Markdown skill card's `Credential Type(s)` label
+  as disclosures. Action verbs, sensitive sources, instructions such as
+  `access the credentials`, other fields and overlong lines retain findings.
 - [#778](https://github.com/NVIDIA/SkillSpector/pull/778) establishes bounded
   Python and Perl host-language ownership for the shell parser.
 - [#784](https://github.com/NVIDIA/SkillSpector/pull/784) shares validated Python
