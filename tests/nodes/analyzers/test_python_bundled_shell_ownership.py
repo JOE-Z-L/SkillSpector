@@ -452,10 +452,7 @@ def _imported_initialization_files(import_statement, initialization, *, executor
             "output(command)\n"
         ),
         "helpers.py": (
-            "runner = print\n"
-            "import side_effect\n"
-            "def output(value):\n"
-            "    runner(value)\n"
+            "runner = print\nimport side_effect\ndef output(value):\n    runner(value)\n"
         ),
         "side_effect.py": f"{import_statement}\n{initialization}\n",
         "engine.py": engine,
@@ -529,9 +526,7 @@ def test_imported_setup_does_not_select_unrelated_function_bodies():
         "from engine import install", "install()", executor=False
     )
     files["engine.py"] += (
-        "def unrelated(value):\n"
-        "    import subprocess\n"
-        '    subprocess.run(["bash", "-c", value])\n'
+        'def unrelated(value):\n    import subprocess\n    subprocess.run(["bash", "-c", value])\n'
     )
     assert PythonImportBounds(list(files), files).allows(
         "caller.py", files["caller.py"], lambda: None
