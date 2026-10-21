@@ -428,3 +428,125 @@ def test_local_initialization_call_cannot_install_an_unchecked_executor(initiali
     assert not PythonImportBounds(list(files), files).allows(
         "caller.py", files["caller.py"], lambda: None
     )
+
+
+def _imported_initialization_files(import_statement, initialization, *, executor):
+    engine = (
+        "def install(value=None):\n"
+        "    import helpers\n"
+        "    import subprocess\n"
+        "    def execute(command):\n"
+        '        subprocess.run(["bash", "-c", command])\n'
+        "    helpers.runner = execute\n"
+        "    return value\n"
+        if executor
+        else 'def install(value=None):\n    print("initializing")\n    return value\n'
+    )
+    return {
+        "caller.py": (
+            "from helpers import output\n"
+            'tool = "echo rm"\n'
+            'command = f"Report `{tool}`"\n'
+            'command = command.removeprefix("Report ")\n'
+            'command += " -rf /"\n'
+            "output(command)\n"
+        ),
+        "helpers.py": (
+            "runner = print\n"
+            "import side_effect\n"
+            "def output(value):\n"
+            "    runner(value)\n"
+        ),
+        "side_effect.py": f"{import_statement}\n{initialization}\n",
+        "engine.py": engine,
+    }
+
+
+@pytest.mark.parametrize("executor", [False, True], ids=["print-only", "shell-executor"])
+@pytest.mark.parametrize(
+    "import_statement,initialization",
+    [
+        ("from engine import install", "install()"),
+        ("from engine import install as setup", "setup()"),
+        ("import engine", "engine.install()"),
+        ("import engine as setup", "setup.install()"),
+        ("from engine import install", "list(map(install, [None]))"),
+        ("import engine", "list(map(engine.install, [None]))"),
+        ("from engine import install", "def unused(value=install()):\n    pass"),
+        ("from engine import install", "def unused(callback=install):\n    pass"),
+        ("from engine import install", "@install\ndef unused():\n    pass"),
+        ("from engine import install", "def unused() -> install():\n    pass"),
+    ],
+    ids=[
+        "from-import",
+        "from-alias",
+        "module-import",
+        "module-alias",
+        "callback",
+        "module-callback",
+        "default-call",
+        "default-callback",
+        "decorator",
+        "return-annotation",
+    ],
+)
+def test_imported_initialization_inspects_used_callable_bodies(
+    import_statement, initialization, executor
+):
+    files = _imported_initialization_files(import_statement, initialization, executor=executor)
+    assert PythonImportBounds(list(files), files).allows(
+        "caller.py", files["caller.py"], lambda: None
+    ) is (not executor)
+    result = static_runner.run_static_patterns_with_ledger(
+        {"components": list(files), "file_cache": files}, [tm]
+    )
+    event = next(event for event in result["inspection_ledger"] if event["path"] == "caller.py")
+    assert event["outcome"] is (LedgerOutcome.PARTIAL if executor else LedgerOutcome.COMPLETED)
+
+
+@pytest.mark.parametrize("aliased", [False, True])
+@pytest.mark.parametrize("executor", [False, True])
+def test_dotted_module_initialization_tracks_the_bound_import_name(aliased, executor):
+    statement = "import pkg.engine as setup" if aliased else "import pkg.engine"
+    expression = "setup.install()" if aliased else "pkg.engine.install()"
+    files = _imported_initialization_files(statement, expression, executor=executor)
+    files["pkg/engine.py"] = files.pop("engine.py")
+    assert PythonImportBounds(list(files), files).allows(
+        "caller.py", files["caller.py"], lambda: None
+    ) is (not executor)
+
+
+@pytest.mark.parametrize("import_statement", ["from engine import install", "import engine"])
+def test_unused_imported_callable_body_is_not_initialization(import_statement):
+    files = _imported_initialization_files(import_statement, "", executor=True)
+    assert PythonImportBounds(list(files), files).allows(
+        "caller.py", files["caller.py"], lambda: None
+    )
+
+
+def test_imported_setup_does_not_select_unrelated_function_bodies():
+    files = _imported_initialization_files(
+        "from engine import install", "install()", executor=False
+    )
+    files["engine.py"] += (
+        "def unrelated(value):\n"
+        "    import subprocess\n"
+        '    subprocess.run(["bash", "-c", value])\n'
+    )
+    assert PythonImportBounds(list(files), files).allows(
+        "caller.py", files["caller.py"], lambda: None
+    )
+
+
+@pytest.mark.parametrize(
+    "budget,limit",
+    [("_MAX_IMPORT_FILES", 3), ("_MAX_IMPORT_DEPTH", 2), ("_MAX_IMPORT_NODES", 1)],
+)
+def test_imported_initialization_retains_bounded_fallback(monkeypatch, budget, limit):
+    files = _imported_initialization_files(
+        "from engine import install", "install()", executor=False
+    )
+    monkeypatch.setattr(python_import_bounds, budget, limit)
+    assert not PythonImportBounds(list(files), files).allows(
+        "caller.py", files["caller.py"], lambda: None
+    )

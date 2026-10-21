@@ -322,12 +322,15 @@ class PythonImportBounds:
                 selected = trimmed
             scope = ast.Module(body=selected, type_ignores=[])
             scope_nodes = []
+            loaded_names: set[str] = set()
             for node in ast.walk(scope):
                 check_runtime()
                 nodes_seen += 1
                 if nodes_seen > _MAX_IMPORT_NODES:
                     return False
                 scope_nodes.append(node)
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                    loaded_names.add(node.id)
             if depth:
                 try:
                     scope_source = ast.unparse(scope)
@@ -343,20 +346,30 @@ class PythonImportBounds:
             for node in scope_nodes:
                 check_runtime()
                 if isinstance(node, ast.Import):
-                    requests = [(alias.name, None, 0) for alias in node.names]
+                    requests = [
+                        (alias.name, None, 0, alias.asname or alias.name.split(".")[0])
+                        for alias in node.names
+                    ]
                 elif isinstance(node, ast.ImportFrom):
-                    requests = [(node.module or "", alias.name, node.level) for alias in node.names]
+                    requests = [
+                        (node.module or "", alias.name, node.level, alias.asname or alias.name)
+                        for alias in node.names
+                    ]
                 else:
                     continue
-                for module, imported_symbol, level in requests:
+                for module, imported_symbol, level, binding in requests:
                     matches = resolve(module, module_path, level)
                     if matches is None or len(matches) > 1:
                         return False
+                    # Initialization can call or expose an imported callable
+                    # through defaults, decorators or callback arguments. Only
+                    # unused imports can omit their selected callable bodies.
+                    initialization_only = symbol == _INITIALIZATION and binding not in loaded_names
                     if matches and (
                         imported_symbol == "*"
                         or not inspect(
                             matches[0],
-                            _INITIALIZATION if symbol == _INITIALIZATION else imported_symbol,
+                            _INITIALIZATION if initialization_only else imported_symbol,
                             depth + 1,
                         )
                     ):
