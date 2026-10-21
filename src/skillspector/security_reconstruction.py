@@ -292,7 +292,7 @@ _INLINE_SHELL_WRAPPER_RE: Final = re.compile(
     re.IGNORECASE,
 )
 _DECODED_ACTIVE_TOKEN_RE: Final = re.compile(
-    r"\b(?:run|execute|invoke|issue|launch|perform|call|eval|type|submit|enter|"
+    r"\b(?:run|execute|invoke|issue|launch|perform|call|eval|type|submit|enter|curl|"
     r"rm|del|erase|sudo|bash|zsh|powershell)\b",
     re.IGNORECASE,
 )

@@ -10,9 +10,9 @@ reporting for failed batch gap-fill passes, and bounded tool-misuse context and
 deadlines. Five are analyzer, report and CLI fixes: TM1 repeated assignments,
 MP3 hardware reset states and state adoption, recursive MEDIUM recommendations,
 and rejection of unsupported recursive and registry option combinations.
-Two further customer fixes prevent ordinary code comparisons from causing
-incomplete inspection and credential-type disclosures from producing false
-credential-access findings. The release includes 14 selected upstream PRs.
+A further customer fix prevents ordinary code comparisons from causing
+incomplete inspection. The release includes 13 selected upstream PRs and the
+minimal command-token prerequisite from #697.
 
 ## Selected changes
 
@@ -20,10 +20,10 @@ credential-access findings. The release includes 14 selected upstream PRs.
   such as `len(value.strip()) < 12` from being read as an unfinished tag-removal
   instruction. Real tag directives, including ones after a comparison, retain
   their existing detection and incomplete-inspection safeguards.
-- [#827](https://github.com/NVIDIA/SkillSpector/pull/827) recognizes access
-  credential nouns inside a Markdown skill card's `Credential Type(s)` label
-  as disclosures. Action verbs, sensitive sources, instructions such as
-  `access the credentials`, other fields and overlong lines retain findings.
+  Its quoted-command controls also require the `curl` active-token entry from
+  [#697](https://github.com/NVIDIA/SkillSpector/pull/697). This release includes
+  that one-token prerequisite; the broader flag and mapping-key exemptions
+  from #697 remain outside this patch.
 - [#778](https://github.com/NVIDIA/SkillSpector/pull/778) establishes bounded
   Python and Perl host-language ownership for the shell parser.
 - [#784](https://github.com/NVIDIA/SkillSpector/pull/784) shares validated Python
@@ -69,8 +69,9 @@ unselected changes from `main`.
   (`scan`, `scan --recursive`, `scan --mcp-registry` and the contributed batch
   scanner's `--output`) and baselines atomically through an already-opened,
   no-follow parent directory. SkillSpector refuses symlinked or special-file
-  destinations, symlinked parent directories and read-only existing files
-  instead of writing through them. `skillspector baseline <path> -o -` writes the
+  destinations, symlinked parent directories and report files it cannot open
+  for writing. Baselines also enforce their existing write-bit restrictions.
+  `skillspector baseline <path> -o -` writes the
   baseline as JSON to stdout.
 
 ## Backported fixes
@@ -121,7 +122,9 @@ On platforms without them, including Windows, `--output` to a file fails before
 analysis: omit `--output` for scan and batch reports, or use
 `skillspector baseline <path> -o -`, and redirect stdout to a new file outside
 the scan target. The parent directory must be writable, and on macOS its
-ancestor directories must also be readable. Report files are written with
+ancestor directories must also be readable. Report writes follow effective
+filesystem permissions, so a privileged user can replace a read-only report.
+Report files are written with
 owner-only (0600) permissions, including when an existing report is replaced;
 run the Docker image with `--user "$(id -u):$(id -g)"` to read reports it writes
 to a mounted directory. Baselines keep the v2.13.0 rules: new files are private,

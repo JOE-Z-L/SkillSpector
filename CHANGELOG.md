@@ -1,7 +1,7 @@
 ### 2.13.1 (Unreleased)
 ### Fixes
-* Treat credential-type labels in skill cards as disclosures while preserving findings for credential-reading or transfer instructions. (#827)
 * Stop ordinary code comparisons after removal verbs from causing false incomplete inspection while retaining real and ambiguous tag-marker directives. (#777)
+* Retain incomplete inspection when a declared-marker instruction exposes an obfuscated curl command, using the minimal command-token prerequisite from #697.
 * Preserve Python and Perl host-language ownership when checking embedded shell text, so ordinary regexes, quoted script text, and report strings do not falsely exhaust the shell parser. (#778, #784, #849)
 * Recognize possessive Markdown prose without weakening inspection of executable shell text. (#849)
 * Retain incomplete inspection when report-shaped strings can reach recognized shell execution, including through bundled helpers or module initialization.
@@ -11,7 +11,7 @@
 ### Backported security fixes
 * Reuse one line index for tool-misuse finding context, so files with thousands of tool-misuse matches are no longer re-read in full for each new finding line, and stop the TM1–TM4 checks and the Perl print helper when the per-file static analysis time limit is reached instead of only after the whole file is scanned. (#790)
 * Keep core findings and findings from completed batches when the contributed batch scanner's non-English gap-fill pass fails part-way, and report the skill as incomplete (`gap_fill_status: "incomplete"` with failure reasons, at least a CAUTION recommendation, and batch exit code 2) instead of treating the failed pass as complete with no findings. (#797)
-* Write report files (`scan`, `scan --recursive`, `scan --mcp-registry` and the contributed batch scanner's `--output`) and baselines atomically through an already-opened, no-follow parent directory, refusing symlinked or special-file destinations, symlinked parent directories and read-only existing files instead of writing through them. File output fails before analysis on platforms without these operations, such as Windows; `skillspector baseline -o -` writes the baseline as JSON to stdout instead. (#798)
+* Write report files (`scan`, `scan --recursive`, `scan --mcp-registry` and the contributed batch scanner's `--output`) and baselines atomically through an already-opened, no-follow parent directory, refusing symlinked or special-file destinations and symlinked parent directories. Report writes preserve effective filesystem write permissions; baselines also enforce their existing write-bit restrictions. File output fails before analysis on platforms without these operations, such as Windows; `skillspector baseline -o -` writes the baseline as JSON to stdout instead. (#798)
 ### Backported fixes
 * Use the final value of a repeated Python assignment target in TM1, so a flag that was set true and then reassigned with `enabled, enabled = True, False` no longer makes a later `shell=enabled` call a HIGH finding. The earlier true value is dropped only when the final value is provably false, the right-hand side is passive and earlier bindings are proven safe in a straight-line module or function scope; other cases keep the existing conservative result. (#820)
 * Reject `--use-shipped-baseline` with exit code 2, before any report is written, when `scan --recursive` detects one or more child skills, instead of silently ignoring it. Scan each sub-skill separately with `--use-shipped-baseline`; a single-skill scan still accepts it with `--recursive`. (#823)
