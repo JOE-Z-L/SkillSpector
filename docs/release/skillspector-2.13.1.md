@@ -71,6 +71,8 @@ unselected changes from `main`.
   no-follow parent directory. SkillSpector refuses symlinked or special-file
   destinations, symlinked parent directories and report files it cannot open
   for writing. Baselines also enforce their existing write-bit restrictions.
+  Temporary report files have inherited access permissions, including macOS
+  ACLs, cleared before any report content is written.
   `skillspector baseline <path> -o -` writes the
   baseline as JSON to stdout.
 
