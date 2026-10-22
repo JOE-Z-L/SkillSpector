@@ -6,7 +6,7 @@ quoted script text, regular expressions, and possessive Markdown prose, and
 false P2 hidden-instruction findings that spanned visible text between HTML
 comments. It also includes quoted-version metadata and passive documentation
 image handling. The maintenance backports include three
-are security fixes: safer report and baseline file output, incomplete-coverage
+security fixes: safer report and baseline file output, incomplete-coverage
 reporting for failed batch gap-fill passes, and bounded tool-misuse context and
 deadlines. Five are analyzer, report and CLI fixes: TM1 repeated assignments,
 MP3 hardware reset states and state adoption, recursive MEDIUM recommendations,
