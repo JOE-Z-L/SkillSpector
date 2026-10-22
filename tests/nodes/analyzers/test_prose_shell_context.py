@@ -447,3 +447,121 @@ def test_nested_list_paragraph_does_not_claim_uncertain_blocks(tail: str) -> Non
 def test_nested_list_continuation_requires_complete_context() -> None:
     content = "- Details\n  - Formula follows:\n    `min(first + 1, last - 1)`\n"
     assert tm._markdown_shell_text(content, lambda: None, complete_context=False) == content
+
+
+@pytest.mark.parametrize("placeholder", ["payload", "jsonl", "CustomToken", "path"])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+@pytest.mark.parametrize(
+    "preamble,marker,indent",
+    [
+        ("", "- ", "  "),
+        ("1. Prepare the capture.\n", "   - ", "     "),
+    ],
+    ids=["flat", "nested"],
+)
+def test_list_placeholder_keeps_multiline_inline_ownership(
+    placeholder: str, newline: str, preamble: str, marker: str, indent: str
+) -> None:
+    content = (
+        f"{preamble}{marker}Record the `first` response:\n"
+        f"{indent}Use `builder --output\n"
+        f"{indent}<{placeholder}>`, then check `second`.\n"
+        f"{marker}Review the result:\n"
+        f"{indent}Keep `$ref` metadata as plain data.\n\n" + _OBSERVATIONS
+    ).replace("\n", newline)
+    assert tm._markdown_shell_text(content, lambda: None) == content.replace("`", " ")
+    result = static_runner.run_static_patterns_with_ledger(
+        {"components": ["guide.md"], "file_cache": {"guide.md": content}}, [tm]
+    )
+    assert result["findings"] == []
+    assert result["inspection_ledger"][0]["outcome"] is LedgerOutcome.COMPLETED
+
+
+@pytest.mark.parametrize(
+    "opening",
+    [
+        "<div>",
+        "<DIV>",
+        "<pre>",
+        "<SCRIPT>",
+        "<table>",
+        "<search>",
+        "<textarea>",
+        "<!--",
+        "<?",
+        "<!DOCTYPE html",
+        "<![CDATA[",
+        "</custom>",
+    ],
+)
+@pytest.mark.parametrize(
+    "prefix,indent",
+    [
+        ("- ", "  "),
+        ("- Details\n  - ", "    "),
+    ],
+    ids=["flat", "nested"],
+)
+def test_list_real_html_blocks_keep_literal_shell_content(
+    opening: str, prefix: str, indent: str
+) -> None:
+    content = f"{prefix}Existing paragraph.\n{indent}{opening}\n{indent}`$(resolve_tool)` -rf /\n"
+    assert tm._markdown_shell_text(content, lambda: None) == content
+    result = static_runner.run_static_patterns_with_ledger(
+        {"components": ["guide.md"], "file_cache": {"guide.md": content}}, [tm]
+    )
+    assert result["inspection_ledger"][0]["outcome"] is LedgerOutcome.PARTIAL
+    assert result["inspection_ledger"][0]["reason_code"] is LedgerReason.STATIC_PARSE_LIMIT
+
+
+def test_closed_declaration_does_not_own_following_flat_list_markdown() -> None:
+    content = "- Existing paragraph.\n  <!DOCTYPE html>\n  `$(resolve_tool)` -rf /\n"
+    assert tm._markdown_shell_text(content, lambda: None) == content.replace("`", " ")
+    result = static_runner.run_static_patterns_with_ledger(
+        {"components": ["guide.md"], "file_cache": {"guide.md": content}}, [tm]
+    )
+    assert result["inspection_ledger"][0]["outcome"] is LedgerOutcome.PARTIAL
+    assert result["inspection_ledger"][0]["reason_code"] is LedgerReason.STATIC_PARSE_LIMIT
+
+
+@pytest.mark.parametrize("command", ["rm -rf /", "$($CMD) -rf /", "`$CMD` -rf /"])
+@pytest.mark.parametrize(
+    "prefix,indent",
+    [
+        ("- ", "  "),
+        ("- Details\n  - ", "    "),
+    ],
+    ids=["flat", "nested"],
+)
+def test_list_placeholder_cannot_hide_following_shell_command(
+    command: str, prefix: str, indent: str
+) -> None:
+    content = (
+        f"{prefix}Read the `first` value:\n"
+        f"{indent}`builder --output\n{indent}<payload>` then inspect the result.\n"
+        f"{indent}Run ``{command}``.\n"
+    )
+    result = static_runner.run_static_patterns_with_ledger(
+        {"components": ["guide.md"], "file_cache": {"guide.md": content}}, [tm]
+    )
+    if command == "rm -rf /":
+        assert any(finding.rule_id == "TM1" for finding in result["findings"])
+    else:
+        assert result["inspection_ledger"][0]["outcome"] is LedgerOutcome.PARTIAL
+        assert result["inspection_ledger"][0]["reason_code"] is LedgerReason.STATIC_PARSE_LIMIT
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "- Details\n  - Example:\n    ```sh\n    <payload>\n    `$(resolve_tool)` -rf /\n    ```\n",
+        "- Details\n  - Example:\n\n    <payload>\n    `$(resolve_tool)` -rf /\n",
+        "- Details\n  - Read `an unresolved\n    <payload>\n" + _OBSERVATIONS,
+    ],
+)
+def test_nested_list_placeholder_does_not_exempt_unproven_content(content: str) -> None:
+    assert tm._markdown_shell_text(content, lambda: None) == content
+    result = static_runner.run_static_patterns_with_ledger(
+        {"components": ["guide.md"], "file_cache": {"guide.md": content}}, [tm]
+    )
+    assert result["inspection_ledger"][0]["outcome"] is LedgerOutcome.PARTIAL

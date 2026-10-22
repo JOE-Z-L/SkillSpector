@@ -182,6 +182,14 @@ _MARKDOWN_WORD_APOSTROPHE_RE = re.compile(
 )
 # Shell syntax that opens a quote, an expansion, or a line continuation.
 _MARKDOWN_PROSE_SHELL_SYNTAX_RE = re.compile(r"[$`\\\"]")
+# CommonMark HTML block types 1 and 6 may interrupt an existing paragraph.
+_MARKDOWN_HTML_BLOCK_TAGS = frozenset(
+    "pre script style textarea address article aside base basefont blockquote body caption center "
+    "col colgroup dd details dialog dir div dl dt fieldset figcaption figure footer form frame "
+    "frameset h1 h2 h3 h4 h5 h6 head header hr html iframe legend li link main menu menuitem nav "
+    "noframes ol optgroup option p param search section summary table tbody td tfoot th thead "
+    "title tr track ul".split()
+)
 _ROOT_GLOB_DOCUMENTATION_LINE_RE = re.compile(
     r"[ \t]*(?:(?:[-*+]|#{1,6})[ \t]+)?"
     r"(?:(?:(?:documentation|note|example)[ \t]*:[ \t]*)"
@@ -4960,7 +4968,15 @@ def _markdown_shell_text(
             # A table row has no paragraph for a Setext underline to close.
             # Single '-' still starts an empty item; '---' remains thematic.
             separator = False
-        html_open = re.match(r"<(?:[A-Za-z][A-Za-z0-9-]*(?=[\s/>]|$)|[!?/])", leading)
+        html_open = re.match(r"<(?:(?P<tag>[A-Za-z][A-Za-z0-9-]*)(?=[\s/>]|$)|[!?/])", leading)
+        if (
+            list_continuation
+            and html_open is not None
+            and html_open["tag"] is not None
+            and html_open["tag"].lower() not in _MARKDOWN_HTML_BLOCK_TAGS
+        ):
+            # A type-7 tag cannot split this open list paragraph's code span.
+            html_open = None
         continuing_paragraph = False
         if table_columns is not None and (
             html_end is not None
