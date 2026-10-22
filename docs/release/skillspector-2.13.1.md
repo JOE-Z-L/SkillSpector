@@ -18,6 +18,13 @@ from #658 used by MP3; the remaining changes from those PRs are excluded.
 
 ## Selected changes
 
+- Follow-up parser corrections preserve opening quotes in inline JSON examples
+  and inline-code delimiters in ordinary nested Markdown list paragraphs.
+  Quotes cannot incorrectly consume later examples; actual shell bodies and
+  uncertain block contexts retain their existing checks and bounds.
+- Explicitly documented dotted configuration fields no longer invent missing
+  files when the bundle contains no matching artifact. Explicit file uses,
+  existing files and ambiguous basename matches retain normal accounting.
 - [#525](https://github.com/NVIDIA/SkillSpector/pull/525) treats quoted version
   numbers in YAML version fields as metadata. Real file references, including
   numeric filenames, keep their normal missing or resolved status.

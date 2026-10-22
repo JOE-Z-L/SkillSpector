@@ -1,5 +1,7 @@
 ### 2.13.1 (Unreleased)
 ### Fixes
+* Preserve quote boundaries in inline JSON examples and inline-code ownership in nested Markdown list paragraphs, avoiding false incomplete inspection while retaining shell-command checks.
+* Treat explicitly documented dotted configuration fields as data when no bundled file matches; explicit file references and existing or ambiguous artifact matches retain normal reference accounting.
 * Treat quoted version numbers in YAML version fields as metadata while preserving real numeric file references and missing-reference reporting. (#525)
 * Avoid format-only AE1 findings for corroborated passive PNG/JPEG documentation images while retaining partial image coverage and genuine security findings. (#877)
 * Inspect imported setup callables during the bounded bundled-helper proof so shell execution cannot incorrectly produce a complete/SAFE result. (#897)

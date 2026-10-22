@@ -72,6 +72,64 @@ _INLINE_CODE_COMMAND_PATH = re.compile(
     r"pwsh|powershell)\b[ \t]+"
     r"((?:\./)?(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+)(?![\w/.-])"
 )
+_DOTTED_IDENTIFIER = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+", re.ASCII)
+_DATA_FIELD_PREFIX = re.compile(
+    r"(?:(?:Use|Inspect|Read|Check)[ \t\r\n]+)?(?:the[ \t\r\n]+|a[ \t\r\n]+)?"
+    r"(?:(?:configuration|config|object|record)[ \t\r\n]+)?"
+    r"(?:field|property|key|selector):?",
+    re.IGNORECASE,
+)
+_DATA_FIELD_READ_PREFIX = re.compile(
+    r"(?:Use|Inspect|Read|Check)(?:[ \t\r\n]+(?:the|a))?|The", re.IGNORECASE
+)
+_DATA_FIELD_SUFFIX = re.compile(
+    r"[ \t\r\n]+(?:"
+    r"(?:field|property|key|selector)\b|"
+    r"from[ \t\r\n]+(?:the[ \t\r\n]+)?(?:live[ \t\r\n]+)?"
+    r"(?:catalog|record|object|configuration)[ \t\r\n]+(?:data|evidence|values)\b)",
+    re.IGNORECASE,
+)
+_DATA_FIELD_SCALAR_SUFFIX = re.compile(
+    r"[ \t\r\n]+carries[ \t\r\n]+(?:the|a)[ \t\r\n]+"
+    r"(?:[A-Za-z][A-Za-z_-]{0,31}[ \t\r\n]+)?(?:identity|value)\b",
+    re.IGNORECASE,
+)
+_DATA_FIELD_CLAUSE_END = re.compile(r"[;!?]|\.[ \t\r\n]|\r?\n[ \t]*\r?\n")
+_DATA_FIELD_FILE_CONTEXT = re.compile(
+    r"\b(?:files?|filenames?|paths?|directories|directory|scripts?|commands?|"
+    r"run|execute|source|open|load|import|include|download|upload|copy|move|delete|"
+    r"cat|less|more|head|tail|grep|sed|awk|bash|sh|zsh|python\d*|node|perl|ruby|"
+    r"curl|wget|chmod|cp|mv|rm)\b|[$|&<>\\]",
+    re.IGNORECASE,
+)
+
+
+def _is_documented_data_field(text: str, start: int, end: int) -> bool:
+    """Recognize bounded, adjacent prose about a scalar rather than an artifact."""
+    if end - start > 128 or _DOTTED_IDENTIFIER.fullmatch(text, start, end) is None:
+        return False
+    if (
+        start < 1
+        or end >= len(text)
+        or text[start - 1] != "`"
+        or text[end] != "`"
+        or (start > 1 and text[start - 2] in "`\\")
+        or (end + 1 < len(text) and text[end + 1] == "`")
+    ):
+        return False
+    context_start = max(0, start - 161)
+    clauses = _DATA_FIELD_CLAUSE_END.split(text[context_start : start - 1])
+    if context_start and len(clauses) == 1:
+        return False
+    before = clauses[-1].strip()
+    after = _DATA_FIELD_CLAUSE_END.split(text[end + 1 : end + 161], maxsplit=1)[0]
+    if _DATA_FIELD_FILE_CONTEXT.search(before) or _DATA_FIELD_FILE_CONTEXT.search(after):
+        return False
+    return bool(
+        _DATA_FIELD_PREFIX.fullmatch(before)
+        or (_DATA_FIELD_READ_PREFIX.fullmatch(before) and _DATA_FIELD_SUFFIX.match(after))
+        or (before.lower() in {"only", "the"} and _DATA_FIELD_SCALAR_SUFFIX.match(after))
+    )
 
 
 @dataclass(frozen=True)
@@ -334,7 +392,7 @@ def _candidate_strings(
     deadline: float,
     clock: Callable[[], float],
     corroborate_images: bool = False,
-) -> tuple[list[tuple[str, int, int, str, ReferenceKind]], tuple[str, ...]]:
+) -> tuple[list[tuple[str, int, int, str, ReferenceKind, bool]], tuple[str, ...]]:
     """Extract path-like strings without materializing all matches or lines.
 
     Each candidate iterator contributes at most one pending match to a small
@@ -342,7 +400,7 @@ def _candidate_strings(
     attacker-controlled line cannot be fully enumerated and sorted before the
     candidate and time ceilings are enforced.
     """
-    candidates: list[tuple[str, int, int, str, ReferenceKind]] = []
+    candidates: list[tuple[str, int, int, str, ReferenceKind, bool]] = []
     limitations: set[str] = set()
     seen: set[tuple[int, int, str]] = set()
     active_fence: tuple[str, int, int, int] | None = None
@@ -515,6 +573,15 @@ def _candidate_strings(
                             match.start + 1,
                             _evidence(cleaned_line, match.start + 1),
                             reference_kind,
+                            reference_kind is ReferenceKind.QUOTED_OR_CODE
+                            and not line_in_frontmatter
+                            and not line_in_fence
+                            and not line_is_indented_code
+                            and not line_in_html
+                            and inline_code_delimiter == 1
+                            and _is_documented_data_field(
+                                text, line_offset + match.start, line_offset + match.end
+                            ),
                         )
                     )
                     if len(candidates) >= MAX_RAW_REFERENCE_CANDIDATES:
@@ -583,7 +650,7 @@ def documentation_image_provenance(
     identities = set()
     non_passive_targets: set[str] = set()
     non_passive_basenames: set[str] = set()
-    for raw, line, column, _evidence_text, kind in candidates:
+    for raw, line, column, _evidence_text, kind, _is_data_field in candidates:
         target = _normalize_candidate(raw, source_path)
         if kind in {ReferenceKind.DOCUMENTATION_IMAGE, ReferenceKind.MARKDOWN_IMAGE}:
             if target is not None:
@@ -655,7 +722,7 @@ def resolve_bundle_references_with_metadata(
     records: list[BundleReference] = []
     source_sha256: str | None = None
     accepted_keys: set[tuple[str, str]] = set()
-    for raw, line, column, evidence, reference_kind in candidates:
+    for raw, line, column, evidence, reference_kind, is_data_field in candidates:
         if clock() > effective_deadline:
             limitations.append("runtime")
             break
@@ -687,6 +754,10 @@ def resolve_bundle_references_with_metadata(
             else:
                 status = "missing"
                 disposition = ArtifactDisposition.PARTIAL
+        # Real inventory matches (including ambiguity) always take precedence
+        # over prose. An independent file use of the same token stays a record.
+        if status == "missing" and is_data_field:
+            continue
         if status != "rejected":
             accepted_key = (status, resolved_target or target or raw)
             if accepted_key not in accepted_keys:

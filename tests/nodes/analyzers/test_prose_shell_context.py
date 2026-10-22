@@ -385,3 +385,65 @@ def test_prose_ownership_checks_cancellation_after_word_jumps(
     content += "\n\n" + prefix + "The interface doesn't match the spec.\n"
     with pytest.raises(TimeoutError, match="cancelled"):
         tm._markdown_shell_text(content, cancel)
+
+
+@pytest.mark.parametrize(
+    "prefix,indent",
+    [("- Details\n  - Formula", "    "), ("- - Formula", "\t"), ("10. Formula", "    ")],
+)
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_nested_list_paragraph_owns_inline_formula(prefix: str, indent: str, newline: str) -> None:
+    content = (
+        prefix
+        + " uses the following value:\n"
+        + indent
+        + "number: `min(worker_count + 1, total_nodes - 1)`, recorded below.\n\n"
+        + _OBSERVATIONS
+        + "\nThe row-first layout is described above.\n"
+    ).replace("\n", newline)
+    projected = tm._markdown_shell_text(content, lambda: None)
+    assert projected == content.replace("`", " ")
+    result = static_runner.run_static_patterns_with_ledger(
+        {"components": ["guide.md"], "file_cache": {"guide.md": content}}, [tm]
+    )
+    assert result["findings"] == []
+    assert result["inspection_ledger"][0]["outcome"] is LedgerOutcome.COMPLETED
+
+
+@pytest.mark.parametrize("command", ["rm -rf /", "$($CMD) -rf /", "`$CMD` -rf /"])
+def test_nested_list_inline_code_retains_shell_bodies(command: str) -> None:
+    content = "- Details\n  - Run the following command:\n    ``" + command + "``\n"
+    result = static_runner.run_static_patterns_with_ledger(
+        {"components": ["guide.md"], "file_cache": {"guide.md": content}}, [tm]
+    )
+    if command == "rm -rf /":
+        assert any(finding.rule_id == "TM1" for finding in result["findings"])
+    else:
+        assert result["inspection_ledger"][0]["outcome"] is LedgerOutcome.PARTIAL
+        assert result["inspection_ledger"][0]["reason_code"] is LedgerReason.STATIC_PARSE_LIMIT
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "\n    `$(resolve_tool)` -rf /\n",
+        "        `$(resolve_tool)` -rf /\n",
+        "    - `$(resolve_tool)\n    - ` -rf /\n",
+        "    ```sh\n    `$(resolve_tool)` -rf /\n    ```\n",
+        "    <pre>\n    `$(resolve_tool)` -rf /\n    </pre>\n",
+        "    | Example |\n    | --- |\n    | `$(resolve_tool)` -rf / |\n",
+    ],
+    ids=["blank", "indented-code", "new-items", "fence", "html", "table"],
+)
+def test_nested_list_paragraph_does_not_claim_uncertain_blocks(tail: str) -> None:
+    content = "- Details\n  - Existing paragraph.\n" + tail
+    assert tm._markdown_shell_text(content, lambda: None) == content
+    result = static_runner.run_static_patterns_with_ledger(
+        {"components": ["guide.md"], "file_cache": {"guide.md": content}}, [tm]
+    )
+    assert result["inspection_ledger"][0]["outcome"] is LedgerOutcome.PARTIAL
+
+
+def test_nested_list_continuation_requires_complete_context() -> None:
+    content = "- Details\n  - Formula follows:\n    `min(first + 1, last - 1)`\n"
+    assert tm._markdown_shell_text(content, lambda: None, complete_context=False) == content

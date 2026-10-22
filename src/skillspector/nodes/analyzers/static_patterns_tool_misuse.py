@@ -506,6 +506,10 @@ def _is_shell_command_word_start(content: str, start: int) -> bool:
     previous = content[start - 1]
     if previous.isspace() or previous in ";|&()<>/":
         return True
+    if previous in "{}" and content[start] in "'\"":
+        # The quoted word's first letter already recognizes this boundary.
+        # Visit its real opener first so a closing quote cannot own later code.
+        return True
     if previous in "'\"`":
         before_quote = start - 2
         return (
@@ -4900,6 +4904,18 @@ def _markdown_shell_text(
         stripped = line.rstrip(LINE_BREAK_CHARS)
         leading = stripped.lstrip(" \t")
         indentation = len(stripped[: len(stripped) - len(leading)].expandtabs(4))
+        # A nested list's ordinary paragraph may start at column four or later.
+        # Keep uncertain block/table syntax and actual indented code literal.
+        list_continuation = (
+            paragraph_open
+            and paragraph_in_list
+            and paragraph_list_indent <= indentation < paragraph_list_indent + 4
+            and "|" not in leading
+            and not leading.startswith((">", "#", "```", "~~~"))
+            and list_marker.match(leading) is None
+            and not _markdown_block_separator(stripped, check_runtime)
+        )
+        indented_code = indentation >= 4 and not list_continuation
         # Interpret list padding in columns, preserving the original offsets.
         # More than four columns after a marker can introduce indented code.
         prefix = len(stripped) - len(leading)
@@ -4999,7 +5015,7 @@ def _markdown_shell_text(
                 else ""
             )
             html_end = None if terminator and terminator in leading.lower() else terminator
-        elif not leading or indentation >= 4 or list_indented:
+        elif not leading or indented_code or list_indented:
             mask_inline_delimiters()
         else:
             # Inline code may continue within a paragraph/list item, but cannot

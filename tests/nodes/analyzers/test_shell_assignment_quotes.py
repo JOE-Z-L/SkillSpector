@@ -8,6 +8,9 @@ import pytest
 from typer.testing import CliRunner
 
 from skillspector.cli import app
+from skillspector.inspection_ledger import LedgerOutcome, LedgerReason
+from skillspector.nodes.analyzers import static_patterns_tool_misuse as tm
+from skillspector.nodes.analyzers import static_runner
 from skillspector.nodes.analyzers.static_patterns_tool_misuse import has_bounded_parse_exhaustion
 
 _COMMENT_PADDING = "\n" + "#" * 6000 + "\n"
@@ -148,3 +151,47 @@ def test_issue_628_bundle_reports_complete_coverage(tmp_path: Path) -> None:
     assert report["analysis_completeness"]["status"] == "complete"
     assert report["analysis_completeness"]["ledger_exceptions"] == []
     assert not any(issue["id"] == "AE1" for issue in report["issues"])
+
+
+@pytest.mark.parametrize("key", ["enabled", "recursive", "depth"])
+@pytest.mark.parametrize("quote", ['"', "'"])
+def test_quote_after_brace_cannot_consume_a_later_example(key: str, quote: str) -> None:
+    content = (
+        f"Use `{{{quote}outer{quote}:{{{quote}{key}{quote}:true}}}}`.\n\n"
+        '```yaml\nvalue: "{workspace}/<folder>"\n```\n' + _COMMENT_PADDING
+    )
+    result = static_runner.run_static_patterns_with_ledger(
+        {"components": ["guide.md"], "file_cache": {"guide.md": content}}, [tm]
+    )
+    assert result["findings"] == []
+    assert result["inspection_ledger"][0]["outcome"] is LedgerOutcome.COMPLETED
+
+
+@pytest.mark.parametrize("brace", ["{", "}"])
+@pytest.mark.parametrize("command", ['"rm"', '"r"m', r'"r"\m', "'r'm"])
+def test_brace_quote_boundary_keeps_destructive_commands(brace: str, command: str) -> None:
+    content = brace + command + " -rf /\n"
+    result = static_runner.run_static_patterns_with_ledger(
+        {"components": ["guide.md"], "file_cache": {"guide.md": content}}, [tm]
+    )
+    assert any(finding.rule_id == "TM1" for finding in result["findings"])
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '"$($CMD)" -rf /',
+        '"$(echo; $CMD -rf /)"',
+        '"`echo; $CMD -rf /`"',
+        '"unclosed\n' + "padding " * 600,
+        '"$(unclosed\n' + "padding " * 600,
+        '"$(' + "r" * 4097 + ' -rf /)"',
+    ],
+)
+def test_brace_quote_boundary_keeps_uncertain_shell_content_partial(body: str) -> None:
+    content = "{" + body + "\n"
+    result = static_runner.run_static_patterns_with_ledger(
+        {"components": ["guide.md"], "file_cache": {"guide.md": content}}, [tm]
+    )
+    assert result["inspection_ledger"][0]["outcome"] is LedgerOutcome.PARTIAL
+    assert result["inspection_ledger"][0]["reason_code"] is LedgerReason.STATIC_PARSE_LIMIT
