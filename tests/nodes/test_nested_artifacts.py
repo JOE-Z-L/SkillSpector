@@ -179,8 +179,12 @@ def test_large_worksheet_retains_analysis_ceiling_and_shared_budget(
     )
     monkeypatch.setattr(nested_artifacts, "MAX_ANALYZABLE_FILE_BYTES", len(worksheet))
     expanded_bytes = sum(map(len, members.values()))
+    raw_file_cache = {"book.xlsx": (tmp_path / "book.xlsx").read_bytes()}
     result = inspect_nested_artifacts(
-        tmp_path, ["book.xlsx"], max_uncompressed_bytes=expanded_bytes - 1
+        tmp_path,
+        ["book.xlsx"],
+        raw_file_cache=raw_file_cache,
+        max_uncompressed_bytes=expanded_bytes - 1,
     )
     assert any(
         event.get("path") == "book.xlsx!/xl/worksheets/sheet1.xml"
@@ -188,7 +192,10 @@ def test_large_worksheet_retains_analysis_ceiling_and_shared_budget(
         for event in result.ledger_events
     )
     result = inspect_nested_artifacts(
-        tmp_path, ["book.xlsx"], max_uncompressed_bytes=expanded_bytes
+        tmp_path,
+        ["book.xlsx"],
+        raw_file_cache=raw_file_cache,
+        max_uncompressed_bytes=expanded_bytes,
     )
     assert result.raw_file_cache["book.xlsx!/xl/worksheets/sheet1.xml"] == worksheet
 
