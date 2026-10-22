@@ -12,6 +12,7 @@ deterministic analyzers.
 from __future__ import annotations
 
 import io
+import posixpath
 import stat
 import struct
 import time
@@ -19,6 +20,7 @@ import zipfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from xml.parsers import expat
 
 import regex  # type: ignore[import-untyped]
 
@@ -29,7 +31,7 @@ from skillspector.artifacts import (
     classify_artifact,
     has_dex_magic,
 )
-from skillspector.constants import MAX_FILE_BYTES
+from skillspector.constants import MAX_ANALYZABLE_FILE_BYTES, MAX_FILE_BYTES
 from skillspector.input_handler import (
     _FileOpenError,
     _open_regular_file_no_follow,
@@ -108,6 +110,27 @@ _EXPECTED_SUFFIXES: dict[str, frozenset[str]] = {
     "pptx": frozenset({".pptx", ".pptm", ".potx", ".potm", ".ppsx", ".ppsm"}),
     "zip": frozenset({".zip"}),
 }
+
+_OFFICE_CONTENT_TYPES_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
+_OFFICE_RELATIONSHIPS_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+_OFFICE_RELATIONSHIP_PREFIXES = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/",
+)
+_WORKSHEET_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"
+)
+_PRINTER_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.printerSettings"
+)
+_WORKBOOK_CONTENT_TYPES = frozenset(
+    {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml",
+        "application/vnd.ms-excel.sheet.macroEnabled.main+xml",
+        "application/vnd.ms-excel.template.macroEnabled.main+xml",
+    }
+)
 
 
 @dataclass
@@ -386,6 +409,167 @@ def _safe_member_name(name: str) -> str | None:
 def _zip_member_is_link(info: zipfile.ZipInfo) -> bool:
     mode = info.external_attr >> 16
     return bool(mode and stat.S_ISLNK(mode))
+
+
+def _office_xml_records(
+    data: bytes, *, relationships: bool, budget: _Budget
+) -> list[tuple[str, dict[str, str]]] | None:
+    """Read bounded OPC metadata without DTDs, entities, or an XML object tree."""
+    namespace = _OFFICE_RELATIONSHIPS_NS if relationships else _OFFICE_CONTENT_TYPES_NS
+    root = "Relationships" if relationships else "Types"
+    records: list[tuple[str, dict[str, str]]] = []
+    depth = 0
+
+    def reject(*_args: object) -> None:
+        raise ValueError("Unsupported Office package metadata")
+
+    def start(name: str, attributes: dict[str, str]) -> None:
+        nonlocal depth
+        if budget.expired():
+            reject()
+        depth += 1
+        if depth == 1 and name == f"{namespace}}}{root}" and not attributes:
+            return
+        allowed = {"Relationship"} if relationships else {"Default", "Override"}
+        local_name = name.removeprefix(f"{namespace}}}")
+        if (
+            depth != 2
+            or not name.startswith(f"{namespace}}}")
+            or local_name not in allowed
+            or len(records) >= ARCHIVE_MAX_MEMBERS
+        ):
+            reject()
+        records.append((local_name, attributes))
+
+    def end(_name: str) -> None:
+        nonlocal depth
+        depth -= 1
+
+    def characters(text: str) -> None:
+        if text.strip():
+            reject()
+
+    if len(data) > MAX_FILE_BYTES or budget.expired():
+        return None
+    parser = expat.ParserCreate(namespace_separator="}")
+    parser.StartElementHandler = start
+    parser.EndElementHandler = end
+    parser.CharacterDataHandler = characters
+    parser.StartDoctypeDeclHandler = reject
+    parser.EntityDeclHandler = reject
+    parser.ExternalEntityRefHandler = lambda *_args: 0
+    try:
+        for offset in range(0, len(data), 65_536):
+            if budget.expired():
+                return None
+            parser.Parse(data[offset : offset + 65_536], False)
+        parser.Parse(b"", True)
+    except (expat.ExpatError, ValueError):
+        return None
+    return records if not budget.expired() else None
+
+
+def _office_content_types(data: bytes, budget: _Budget) -> dict[str, str] | None:
+    records = _office_xml_records(data, relationships=False, budget=budget)
+    if records is None:
+        return None
+    content_types: dict[str, str] = {}
+    for kind, attributes in records:
+        field = "Extension" if kind == "Default" else "PartName"
+        if set(attributes) != {field, "ContentType"}:
+            return None
+        name = attributes[field]
+        if kind == "Default":
+            if not name or not name.isascii() or not name.isalnum():
+                return None
+            key = "." + name.lower()
+        else:
+            if not name.startswith("/") or _safe_member_name(name[1:]) != name[1:]:
+                return None
+            key = name
+        if key in content_types:
+            return None
+        content_types[key] = attributes["ContentType"]
+    return content_types
+
+
+def _office_relationships(
+    data: bytes, *, source: str, budget: _Budget
+) -> dict[str, tuple[str, str]] | None:
+    records = _office_xml_records(data, relationships=True, budget=budget)
+    if records is None:
+        return None
+    relationships: dict[str, tuple[str, str]] = {}
+    for _kind, attributes in records:
+        if not {"Id", "Type", "Target"}.issubset(attributes) or set(attributes) - {
+            "Id",
+            "Type",
+            "Target",
+            "TargetMode",
+        }:
+            return None
+        identifier = attributes["Id"]
+        if not identifier or identifier in relationships:
+            return None
+        target = attributes["Target"]
+        mode = attributes.get("TargetMode", "Internal")
+        if mode not in {"Internal", "External"}:
+            return None
+        if mode == "External":
+            relationships[identifier] = (attributes["Type"], "")
+            continue
+        if not target or any(character in target for character in "\\%?#:"):
+            return None
+        resolved = posixpath.normpath(
+            target[1:]
+            if target.startswith("/")
+            else posixpath.join(posixpath.dirname(source), target)
+        )
+        if _safe_member_name(resolved) != resolved:
+            return None
+        relationships[identifier] = (attributes["Type"], resolved)
+    return relationships
+
+
+def _office_part_type(path: str, content_types: dict[str, str] | None) -> str | None:
+    if content_types is None:
+        return None
+    return content_types.get("/" + path, content_types.get(Path(path).suffix.lower()))
+
+
+def _office_related_parts(relationships: dict[str, tuple[str, str]] | None, kind: str) -> set[str]:
+    if relationships is None:
+        return set()
+    return {
+        target
+        for relation_type, target in relationships.values()
+        if target and relation_type in {prefix + kind for prefix in _OFFICE_RELATIONSHIP_PREFIXES}
+    }
+
+
+def _is_office_devmode(data: bytes, mode: int) -> bool:
+    """Recognize the complete DEVMODEW envelope, not the safety of driver-private bytes."""
+    if (
+        len(data) < 220
+        or mode & 0o111
+        or data.startswith(b"#!")
+        or has_binary_executable_magic(data)
+    ):
+        return False
+    version, _driver, size, extra = struct.unpack_from("<HHHH", data, 64)
+    if version != 0x0401 or size != 220 or len(data) != size + extra:
+        return False
+    for start, required in ((0, True), (102, False)):
+        try:
+            field = data[start : start + 64].decode("utf-16-le")
+        except UnicodeDecodeError:
+            return False
+        name, separator, padding = field.partition("\x00")
+        if not separator or (required and not name) or padding.strip("\x00"):
+            return False
+        if not all(character.isprintable() for character in name):
+            return False
+    return True
 
 
 _BINARY_EXECUTABLE_MAGICS = (
@@ -827,6 +1011,30 @@ def _inspect_zip_bytes(
         budget.members += len(infos)
         infos = _sorted_infos(infos)
         current_type = _container_type([info.filename for info in infos])
+        office_infos: dict[str, zipfile.ZipInfo] = {}
+        office_content_types: dict[str, str] | None = None
+        office_relationships: dict[str, dict[str, tuple[str, str]] | None] = {}
+        worksheet_parts: set[str] = set()
+        name_counts: dict[str | None, int] = {}
+        if current_type == "xlsx":
+            for info in infos:
+                name = _safe_member_name(info.filename)
+                name_counts[name] = name_counts.get(name, 0) + 1
+            office_infos = {
+                info.filename: info
+                for info in infos
+                if name_counts.get(info.filename) == 1 and not info.is_dir()
+            }
+            # Inspect metadata first through the same read/accounting path, once.
+            infos.sort(
+                key=lambda info: (
+                    0
+                    if info.filename == "[Content_Types].xml"
+                    else 1
+                    if info.filename.endswith(".rels")
+                    else 2
+                )
+            )
         effective_outer_disguised = (
             outer_disguised
             if outer_disguised is not None
@@ -850,6 +1058,7 @@ def _inspect_zip_bytes(
             inherited_reason_list.append("disguised_container")
         inherited_reasons = tuple(inherited_reason_list)
         seen_names: set[str] = set()
+        owned_parts: set[str] = set()
 
         for info in infos:
             if info.is_dir():
@@ -961,7 +1170,12 @@ def _inspect_zip_bytes(
                     limit_bytes=budget.max_uncompressed_bytes,
                 )
                 continue
-            if info.file_size > budget.max_member_bytes:
+            member_limit = (
+                MAX_ANALYZABLE_FILE_BYTES
+                if safe_name in worksheet_parts
+                else budget.max_member_bytes
+            )
+            if info.file_size > member_limit:
                 _add_unreadable_component(
                     result,
                     virtual_path=virtual_path,
@@ -979,13 +1193,13 @@ def _inspect_zip_bytes(
                     path=virtual_path,
                     reason=LedgerReason.ARCHIVE_MEMBER_SIZE_LIMIT,
                     observed_bytes=info.file_size,
-                    limit_bytes=budget.max_member_bytes,
+                    limit_bytes=member_limit,
                 )
                 continue
 
             try:
                 with archive.open(info) as source:
-                    member_data = source.read(budget.max_member_bytes + 1)
+                    member_data = source.read(member_limit + 1)
             except NotImplementedError:
                 _add_unreadable_component(
                     result,
@@ -1041,7 +1255,7 @@ def _inspect_zip_bytes(
                 _exception(result, path=virtual_path, reason=LedgerReason.ARCHIVE_TRUNCATED)
                 continue
 
-            if len(member_data) > budget.max_member_bytes:
+            if len(member_data) > member_limit:
                 _add_unreadable_component(
                     result,
                     virtual_path=virtual_path,
@@ -1059,7 +1273,7 @@ def _inspect_zip_bytes(
                     path=virtual_path,
                     reason=LedgerReason.ARCHIVE_MEMBER_SIZE_LIMIT,
                     observed_bytes=len(member_data),
-                    limit_bytes=budget.max_member_bytes,
+                    limit_bytes=member_limit,
                 )
                 continue
 
@@ -1139,6 +1353,7 @@ def _inspect_zip_bytes(
             result.components.append(virtual_path)
             result.file_cache[virtual_path] = member_data.decode("utf-8", errors="replace")
             result.raw_file_cache[virtual_path] = member_data
+            owned_parts.add(safe_name)
             result.python_source_classifications[virtual_path] = source_classification
             artifact = classify_artifact(virtual_path, member_data)
             result.artifact_inventory.append(artifact)
@@ -1167,6 +1382,43 @@ def _inspect_zip_bytes(
                 }
             )
 
+            if safe_name in office_infos:
+                metadata_changed = False
+                metadata_parsed = False
+                if safe_name == "[Content_Types].xml":
+                    office_content_types = _office_content_types(member_data, budget)
+                    metadata_changed = True
+                    metadata_parsed = True
+                elif safe_name.endswith(".rels"):
+                    parent, _, filename = safe_name.rpartition("/")
+                    if parent.endswith("/_rels"):
+                        source = parent[:-6] + "/" + filename[:-5]
+                        if source in office_infos:
+                            office_relationships[source] = _office_relationships(
+                                member_data, source=source, budget=budget
+                            )
+                            metadata_changed = source == "xl/workbook.xml"
+                            metadata_parsed = True
+                if metadata_changed:
+                    worksheet_parts = (
+                        {
+                            target
+                            for target in _office_related_parts(
+                                office_relationships.get("xl/workbook.xml"), "worksheet"
+                            )
+                            if target in office_infos
+                            and _office_part_type(target, office_content_types)
+                            == _WORKSHEET_CONTENT_TYPE
+                        }
+                        if _office_part_type("xl/workbook.xml", office_content_types)
+                        in _WORKBOOK_CONTENT_TYPES
+                        else set()
+                    )
+                if metadata_parsed and budget.expired():
+                    budget.halted = True
+                    _time_exception(result, path=virtual_path, budget=budget)
+                    return
+
             if not nested_zip:
                 continue
             result.recognized_zip_paths.add(virtual_path)
@@ -1191,6 +1443,49 @@ def _inspect_zip_bytes(
                 budget=budget,
                 result=result,
             )
+
+        if not worksheet_parts:
+            return
+        metadata_by_path = {str(item["path"]): item for item in result.metadata}
+        inventory_by_path = {item["path"]: item for item in result.artifact_inventory}
+        for worksheet in sorted(worksheet_parts):
+            if budget.expired():
+                budget.halted = True
+                _time_exception(result, path=container_virtual_path, budget=budget)
+                return
+            worksheet_path = f"{container_virtual_path}!/{worksheet}"
+            if worksheet not in owned_parts or worksheet_path not in result.raw_file_cache:
+                continue
+            printer_parts = _office_related_parts(
+                office_relationships.get(worksheet), "printerSettings"
+            )
+            if len(printer_parts) != 1:
+                continue
+            printer_part = next(iter(printer_parts))
+            printer_path = f"{container_virtual_path}!/{printer_part}"
+            printer_info = office_infos.get(printer_part)
+            printer_data = result.raw_file_cache.get(printer_path)
+            printer_parent, _, printer_name = printer_part.rpartition("/")
+            printer_relations = posixpath.join(printer_parent, "_rels", printer_name + ".rels")
+            if (
+                printer_info is None
+                or printer_data is None
+                or printer_part not in owned_parts
+                or Path(printer_part).suffix.lower() != ".bin"
+                or printer_relations in name_counts
+                or _office_part_type(printer_part, office_content_types) != _PRINTER_CONTENT_TYPE
+                or not _is_office_devmode(printer_data, printer_info.external_attr >> 16)
+            ):
+                continue
+            metadata = metadata_by_path[printer_path]
+            metadata["executable"] = False
+            metadata["concealed_executable"] = False
+            metadata["office_printer_settings"] = True
+            # Preserve full text inspection when already supported. Otherwise
+            # retain raw YARA and an explicit bounded binary-projection scope.
+            artifact = inventory_by_path[printer_path]
+            if artifact["content_kind"] == ContentKind.BINARY:
+                artifact["readable_binary"] = True
 
 
 def inspect_nested_artifacts(
