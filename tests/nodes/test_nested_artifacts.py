@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
-import io
 import hashlib
+import io
 import json
 import stat
 import struct
@@ -34,11 +34,11 @@ from skillspector.nested_artifacts import (
     inspect_nested_artifacts,
     is_executable_content,
 )
-from skillspector.nodes.analyzers.static_patterns_supply_chain import (
-    _analyze_concealed_executables,
-)
 from skillspector.nodes.analyzers.static_patterns_prompt_injection import (
     node as analyze_prompt_injection,
+)
+from skillspector.nodes.analyzers.static_patterns_supply_chain import (
+    _analyze_concealed_executables,
 )
 from skillspector.nodes.analyzers.static_patterns_tool_misuse import node as analyze_tool_misuse
 from skillspector.nodes.build_context import build_context
