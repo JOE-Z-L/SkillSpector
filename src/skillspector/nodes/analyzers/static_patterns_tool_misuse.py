@@ -514,9 +514,9 @@ def _is_shell_command_word_start(content: str, start: int) -> bool:
     previous = content[start - 1]
     if previous.isspace() or previous in ";|&()<>/":
         return True
-    if previous in "{}" and content[start] in "'\"":
-        # The quoted word's first letter already recognizes this boundary.
-        # Visit its real opener first so a closing quote cannot own later code.
+    if previous == "{" and content[start] in "'\"":
+        # Visit an inline object key's opener before its first letter.
+        # A closing brace can instead precede a string's closing quote.
         return True
     if previous in "'\"`":
         before_quote = start - 2

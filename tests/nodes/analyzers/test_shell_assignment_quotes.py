@@ -15,6 +15,7 @@ from skillspector.nodes.analyzers.static_patterns_tool_misuse import has_bounded
 
 _COMMENT_PADDING = "\n" + "#" * 6000 + "\n"
 _APOSTROPHE_PADDING = "\n" + "y = 'b'\n" * 800
+_PYTHON_FSTRING_HEREDOC = "python3 <<'PY'\nvalue = 1\nprint(f\"Result: {value}\")\nPY\n"
 
 
 @pytest.mark.parametrize(
@@ -167,10 +168,37 @@ def test_quote_after_brace_cannot_consume_a_later_example(key: str, quote: str) 
     assert result["inspection_ledger"][0]["outcome"] is LedgerOutcome.COMPLETED
 
 
-@pytest.mark.parametrize("brace", ["{", "}"])
+@pytest.mark.parametrize("padding", [0, 6000], ids=["short", "long"])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_heredoc_fstring_closer_cannot_open_a_shell_word(padding: int, newline: str) -> None:
+    content = (_PYTHON_FSTRING_HEREDOC + "printf ready\n" + "#" * padding + "\n").replace(
+        "\n", newline
+    )
+    result = static_runner.run_static_patterns_with_ledger(
+        {"components": ["script.sh"], "file_cache": {"script.sh": content}}, [tm]
+    )
+    assert result["findings"] == []
+    assert result["inspection_ledger"][0]["outcome"] is LedgerOutcome.COMPLETED
+
+
+@pytest.mark.parametrize("command", ["$($CMD) -rf /", "rm -rf /", '"unclosed'])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_heredoc_fstring_cannot_hide_following_shell_commands(command: str, newline: str) -> None:
+    content = (_PYTHON_FSTRING_HEREDOC + command + _COMMENT_PADDING).replace("\n", newline)
+    result = static_runner.run_static_patterns_with_ledger(
+        {"components": ["script.sh"], "file_cache": {"script.sh": content}}, [tm]
+    )
+    if command == "rm -rf /":
+        assert any(finding.rule_id == "TM1" for finding in result["findings"])
+    else:
+        assert result["inspection_ledger"][0]["outcome"] is LedgerOutcome.PARTIAL
+        assert result["inspection_ledger"][0]["reason_code"] is LedgerReason.STATIC_PARSE_LIMIT
+
+
+@pytest.mark.parametrize("prefix", ["{", "{ :; }; "])
 @pytest.mark.parametrize("command", ['"rm"', '"r"m', r'"r"\m', "'r'm"])
-def test_brace_quote_boundary_keeps_destructive_commands(brace: str, command: str) -> None:
-    content = brace + command + " -rf /\n"
+def test_brace_quote_boundary_keeps_destructive_commands(prefix: str, command: str) -> None:
+    content = prefix + command + " -rf /\n"
     result = static_runner.run_static_patterns_with_ledger(
         {"components": ["guide.md"], "file_cache": {"guide.md": content}}, [tm]
     )
