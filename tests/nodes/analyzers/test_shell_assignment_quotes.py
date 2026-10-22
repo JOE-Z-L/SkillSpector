@@ -188,10 +188,32 @@ def test_brace_quote_boundary_keeps_destructive_commands(brace: str, command: st
         '"$(' + "r" * 4097 + ' -rf /)"',
     ],
 )
-def test_brace_quote_boundary_keeps_uncertain_shell_content_partial(body: str) -> None:
+@pytest.mark.parametrize("path", ["script.sh", "guide.md"])
+def test_brace_quote_boundary_keeps_uncertain_shell_content_partial(body: str, path: str) -> None:
     content = "{" + body + "\n"
+    if path.endswith(".md"):
+        content = "```sh\n" + content + "```\n"
+    result = static_runner.run_static_patterns_with_ledger(
+        {"components": [path], "file_cache": {path: content}}, [tm]
+    )
+    assert result["inspection_ledger"][0]["outcome"] is LedgerOutcome.PARTIAL
+    assert result["inspection_ledger"][0]["reason_code"] is LedgerReason.STATIC_PARSE_LIMIT
+
+
+def test_wider_inline_span_keeps_inner_shell_backticks_partial() -> None:
+    content = '``{"`echo; $CMD -rf /`"``\n'
     result = static_runner.run_static_patterns_with_ledger(
         {"components": ["guide.md"], "file_cache": {"guide.md": content}}, [tm]
     )
     assert result["inspection_ledger"][0]["outcome"] is LedgerOutcome.PARTIAL
     assert result["inspection_ledger"][0]["reason_code"] is LedgerReason.STATIC_PARSE_LIMIT
+
+
+@pytest.mark.parametrize("prefix", ["", "{"])
+def test_markdown_inline_delimiters_do_not_create_shell_substitutions(prefix: str) -> None:
+    content = prefix + '"`echo; $CMD -rf /`"\n'
+    assert tm._markdown_shell_text(content, lambda: None) == content.replace("`", " ")
+    result = static_runner.run_static_patterns_with_ledger(
+        {"components": ["guide.md"], "file_cache": {"guide.md": content}}, [tm]
+    )
+    assert result["inspection_ledger"][0]["outcome"] is LedgerOutcome.COMPLETED
