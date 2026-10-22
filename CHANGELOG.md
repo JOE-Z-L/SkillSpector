@@ -1,5 +1,8 @@
 ### 2.13.1 (Unreleased)
 ### Fixes
+* Treat quoted version numbers in YAML version fields as metadata while preserving real numeric file references and missing-reference reporting. (#525)
+* Avoid format-only AE1 findings for corroborated passive PNG/JPEG documentation images while retaining partial image coverage and genuine security findings. (#877)
+* Inspect imported setup callables during the bounded bundled-helper proof so shell execution cannot incorrectly produce a complete/SAFE result. (#897)
 * Stop ordinary code comparisons after removal verbs from causing false incomplete inspection while retaining real and ambiguous tag-marker directives. (#777)
 * Retain incomplete inspection when a declared-marker instruction exposes an obfuscated curl command, using the minimal command-token prerequisite from #697.
 * Preserve Python and Perl host-language ownership when checking embedded shell text, so ordinary regexes, quoted script text, and report strings do not falsely exhaust the shell parser. (#778, #784, #849)

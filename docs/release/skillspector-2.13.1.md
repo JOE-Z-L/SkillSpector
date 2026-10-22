@@ -4,18 +4,29 @@ This patch release is based on the published v2.13.0 maintenance branch. It
 corrects false incomplete-analysis reports for ordinary Python report strings,
 quoted script text, regular expressions, and possessive Markdown prose, and
 false P2 hidden-instruction findings that spanned visible text between HTML
-comments. It also backports eight fixes merged to `main` after v2.13.0. Three
+comments. It also includes quoted-version metadata and passive documentation
+image handling. The maintenance backports include three
 are security fixes: safer report and baseline file output, incomplete-coverage
 reporting for failed batch gap-fill passes, and bounded tool-misuse context and
 deadlines. Five are analyzer, report and CLI fixes: TM1 repeated assignments,
 MP3 hardware reset states and state adoption, recursive MEDIUM recommendations,
 and rejection of unsupported recursive and registry option combinations.
 A further customer fix prevents ordinary code comparisons from causing
-incomplete inspection. The release includes 13 selected upstream PRs and the
-minimal command-token prerequisite from #697.
+incomplete inspection. The selected changes below include the minimal
+command-token prerequisite from #697 and the prohibition-context prerequisite
+from #658 used by MP3; the remaining changes from those PRs are excluded.
 
 ## Selected changes
 
+- [#525](https://github.com/NVIDIA/SkillSpector/pull/525) treats quoted version
+  numbers in YAML version fields as metadata. Real file references, including
+  numeric filenames, keep their normal missing or resolved status.
+- [#877](https://github.com/NVIDIA/SkillSpector/pull/877) avoids format-only AE1
+  findings for corroborated passive PNG/JPEG documentation images. Exact source
+  provenance, supported image structure and complete limitation evidence are
+  required. Image coverage remains partial; this does not perform OCR or image
+  semantic inspection. Executable uses, malformed images and independent
+  findings retain their safeguards.
 - [#777](https://github.com/NVIDIA/SkillSpector/pull/777) keeps comparisons
   such as `len(value.strip()) < 12` from being read as an unfinished tag-removal
   instruction. Real tag directives, including ones after a comparison, retain
@@ -35,6 +46,9 @@ minimal command-token prerequisite from #697.
   The check covers recognized local execution and a bounded set of bundled
   helpers, including import-time initialization. It does not lower findings
   or suppress an incomplete scan.
+- [#897](https://github.com/NVIDIA/SkillSpector/pull/897) corrects the release's
+  bundled-helper proof so imported setup functions, callbacks, defaults and
+  decorators cannot hide shell execution behind a false complete/SAFE result.
 - Deep expressions in bundled Python helpers retain conservative shell bounds
   when the optional import proof exceeds Python's serialization recursion limit,
   instead of causing an analyzer failure.
@@ -73,6 +87,8 @@ unselected changes from `main`.
   for writing. Baselines also enforce their existing write-bit restrictions.
   Temporary report files have inherited access permissions, including macOS
   ACLs, cleared before any report content is written.
+  This includes the correction tracked in
+  [#896](https://github.com/NVIDIA/SkillSpector/pull/896).
   `skillspector baseline <path> -o -` writes the
   baseline as JSON to stdout.
 
@@ -112,7 +128,11 @@ Genuine incomplete inspection and independent security findings remain blocking
 signals. A missing-reference advisory is distinct from an uninspected existing
 artifact. This patch does not resolve every parser limitation: nested Markdown
 table cases and references to otherwise inspected ZIP/XLSX containers retain
-their existing limitations. Passive image handling is unchanged.
+their existing limitations. Large worksheets and printer metadata are not
+claimed resolved by the parser or image fixes. The SC8 CPU-budget correction
+from [#828](https://github.com/NVIDIA/SkillSpector/pull/828) is inherited from
+v2.13.0. Downstream admission, semantic-response handling and original customer
+reruns require separate qualification with the paired evaluator artifact.
 
 The bundled-helper check reads only materialized scan inputs. Unsupported,
 ambiguous, missing, cyclic, or over-budget local evidence retains the previous
