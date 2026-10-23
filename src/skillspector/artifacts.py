@@ -47,6 +47,7 @@ class ReferenceKind(StrEnum):
     """Syntactic use that produced one intra-bundle reference."""
 
     MARKDOWN_IMAGE = "markdown_image"
+    DOCUMENTATION_IMAGE = "documentation_image"
     MARKDOWN_LINK = "markdown_link"
     INLINE_COMMAND = "inline_command"
     QUOTED_OR_CODE = "quoted_or_code"
@@ -80,6 +81,7 @@ class BundleReference(TypedDict):
     status: str
     disposition: ArtifactDisposition
     reference_kind: ReferenceKind
+    source_sha256: NotRequired[str]
 
 
 @dataclass(frozen=True)
@@ -252,6 +254,7 @@ _ALLOWED_FORMAT_CHARS = frozenset({"\n", "\r", "\t"})
 # real skill, `_has_letter_spacing_run` ran 780 times over 23 distinct texts.
 # The bound keeps a long-lived process from retaining file content indefinitely.
 _TEXT_PREDICATE_CACHE_SIZE = 64
+_CHARACTER_CACHE_SIZE = 1024
 
 _IGNORED_ASCII_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _LETTER_SPACING_CANDIDATE = re.compile(
@@ -546,6 +549,7 @@ def _is_non_ascii_separator(ch: str) -> bool:
     return not ch.isascii() and unicodedata.category(ch).startswith("Z")
 
 
+@lru_cache(maxsize=_CHARACTER_CACHE_SIZE)
 def _is_letter_spacing_separator(ch: str) -> bool:
     """Return whether *ch* can separate single-letter obfuscation tokens."""
     if ch in {"\n", "\r", "\u2028", "\u2029"} or ch.isalnum():
@@ -689,6 +693,7 @@ def _concealed_instruction_run_spans(
             offset = run_start + 1
 
 
+@lru_cache(maxsize=_CHARACTER_CACHE_SIZE)
 def _security_skeleton_piece(character: str) -> str:
     """Return the case-folded NFKC/confusable skeleton for one source character."""
     folded = (
@@ -2074,10 +2079,12 @@ def prompt_injection_letter_spacing_view(
     transformed = False
 
     def append_source(start: int, end: int) -> None:
-        for source_offset in range(start, end):
-            record_work()
-            output.write(text[source_offset])
-            offsets.append(source_offset)
+        while start < end:
+            chunk_end = min(start + 4096 - processed_since_check, end)
+            output.write(text[start:chunk_end])
+            offsets.extend(range(start, chunk_end))
+            record_work(chunk_end - start)
+            start = chunk_end
 
     cursor = 0
     index = 0
@@ -2249,10 +2256,15 @@ def multiline_prompt_injection_view(
             checked_offset = source_offset
 
     def append_source(start: int, end: int) -> None:
-        for source_offset in range(start, end):
-            record_work(source_offset)
-            output.write(text[source_offset])
-            offsets.append(source_offset)
+        while start < end:
+            record_work(start)
+            chunk_end = min(start + 4096, end)
+            if check_runtime is not None:
+                chunk_end = min(chunk_end, checked_offset + 4096)
+            output.write(text[start:chunk_end])
+            offsets.extend(range(start, chunk_end))
+            record_work(chunk_end)
+            start = chunk_end
 
     while match is not None:
         run_start = match.start()

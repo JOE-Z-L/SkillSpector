@@ -1,0 +1,202 @@
+# SkillSpector 2.13.1
+
+This patch release is based on the published v2.13.0 maintenance branch. It
+corrects false incomplete-analysis reports for ordinary Python report strings,
+quoted script text, regular expressions, and possessive Markdown prose, and
+false P2 hidden-instruction findings that spanned visible text between HTML
+comments. It also includes quoted-version metadata and passive documentation
+image handling. The maintenance backports include three
+security fixes: safer report and baseline file output, incomplete-coverage
+reporting for failed batch gap-fill passes, and bounded tool-misuse context and
+deadlines. Five are analyzer, report and CLI fixes: TM1 repeated assignments,
+MP3 hardware reset states and state adoption, recursive MEDIUM recommendations,
+and rejection of unsupported recursive and registry option combinations.
+A further customer fix prevents ordinary code comparisons from causing
+incomplete inspection. The selected changes below include the minimal
+command-token prerequisite from #697 and the prohibition-context prerequisite
+from #658 used by MP3; the remaining changes from those PRs are excluded.
+
+## Selected changes
+
+- Follow-up parser corrections preserve opening quotes in inline JSON examples
+  and inline-code delimiters in ordinary nested Markdown list paragraphs.
+  Quotes cannot incorrectly consume later examples; actual shell bodies and
+  uncertain block contexts retain their existing checks and bounds.
+- Explicitly documented dotted configuration fields no longer invent missing
+  files when the bundle contains no matching artifact. Explicit file uses,
+  existing files and ambiguous basename matches retain normal accounting.
+- [#525](https://github.com/NVIDIA/SkillSpector/pull/525) treats quoted version
+  numbers in YAML version fields as metadata. Real file references, including
+  numeric filenames, keep their normal missing or resolved status.
+- [#877](https://github.com/NVIDIA/SkillSpector/pull/877) avoids format-only AE1
+  findings for corroborated passive PNG/JPEG documentation images. Exact source
+  provenance, supported image structure and complete limitation evidence are
+  required. Image coverage remains partial; this does not perform OCR or image
+  semantic inspection. Executable uses, malformed images and independent
+  findings retain their safeguards.
+- [#777](https://github.com/NVIDIA/SkillSpector/pull/777) keeps comparisons
+  such as `len(value.strip()) < 12` from being read as an unfinished tag-removal
+  instruction. Real tag directives, including ones after a comparison, retain
+  their existing detection and incomplete-inspection safeguards.
+  Its quoted-command controls also require the `curl` active-token entry from
+  [#697](https://github.com/NVIDIA/SkillSpector/pull/697). This release includes
+  that one-token prerequisite; the broader flag and mapping-key exemptions
+  from #697 remain outside this patch.
+- [#778](https://github.com/NVIDIA/SkillSpector/pull/778) establishes bounded
+  Python and Perl host-language ownership for the shell parser.
+- [#784](https://github.com/NVIDIA/SkillSpector/pull/784) shares validated Python
+  quote ownership with marker reconstruction.
+- [#849](https://github.com/NVIDIA/SkillSpector/pull/849) corrects prose and
+  report-string parsing, using those prerequisites.
+- Additional release hardening retains the previous incomplete-inspection
+  result when a report-shaped string is later assembled into a shell command.
+  The check covers recognized local execution and a bounded set of bundled
+  helpers, including import-time initialization. It does not lower findings
+  or suppress an incomplete scan.
+- [#897](https://github.com/NVIDIA/SkillSpector/pull/897) corrects the release's
+  bundled-helper proof so imported setup functions, callbacks, defaults and
+  decorators cannot hide shell execution behind a false complete/SAFE result.
+- Deep expressions in bundled Python helpers retain conservative shell bounds
+  when the optional import proof exceeds Python's serialization recursion limit,
+  instead of causing an analyzer failure.
+- [#452](https://github.com/NVIDIA/SkillSpector/pull/452) keeps each P2
+  hidden-instruction match inside one HTML comment, including the `--!>`,
+  `<!-->` and `<!--->` closers. Keywords match at word and identifier
+  boundaries, so visible text and words such as `target` or `POSTGRES` are not
+  reported as hidden instructions. Run-together directives such as
+  `PLEASEIGNOREPREVIOUSINSTRUCTIONS` remain detected.
+- Source distributions exclude the `.uv-cache` directory used by the release
+  workflow.
+
+The release preserves v2.13.0's third-party dependency lock, provider and model
+defaults, and existing publishing workflow. It does not take the remaining
+unselected changes from `main`.
+
+## Backported security fixes
+
+- [#790](https://github.com/NVIDIA/SkillSpector/pull/790) makes the tool-misuse
+  analyzer reuse one line index for finding context, so files with thousands of
+  tool-misuse matches are no longer re-read in full for each new finding line.
+  The TM1–TM4 checks and the Perl print helper now stop when the per-file static
+  analysis time limit is reached, instead of only after the whole file is
+  scanned.
+- [#797](https://github.com/NVIDIA/SkillSpector/pull/797) keeps core findings
+  and findings from completed batches when the contributed batch scanner's
+  non-English gap-fill pass fails part-way. The skill is reported as incomplete
+  (`gap_fill_status: "incomplete"` with failure reasons and at least a CAUTION
+  recommendation), and the batch run exits with code 2. Previously the failed
+  pass was treated as complete with no findings.
+- [#798](https://github.com/NVIDIA/SkillSpector/pull/798) writes report files
+  (`scan`, `scan --recursive`, `scan --mcp-registry` and the contributed batch
+  scanner's `--output`) and baselines atomically through an already-opened,
+  no-follow parent directory. SkillSpector refuses symlinked or special-file
+  destinations, symlinked parent directories and report files it cannot open
+  for writing. Baselines also enforce their existing write-bit restrictions.
+  Temporary report files have inherited access permissions, including macOS
+  ACLs, cleared before any report content is written.
+  This includes the correction tracked in
+  [#896](https://github.com/NVIDIA/SkillSpector/pull/896).
+  `skillspector baseline <path> -o -` writes the
+  baseline as JSON to stdout.
+
+## Backported fixes
+
+- [#820](https://github.com/NVIDIA/SkillSpector/pull/820) makes TM1 use the
+  final value of a repeated Python assignment target. A flag that was set true
+  and then reassigned with `enabled, enabled = True, False` no longer makes a
+  later `shell=enabled` call a HIGH finding. The earlier true value is dropped
+  only when the final value is provably false, the right-hand side is passive,
+  and earlier bindings are proven safe in a straight-line module or function
+  scope. Other cases keep the existing conservative result.
+- [#823](https://github.com/NVIDIA/SkillSpector/pull/823) rejects
+  `--use-shipped-baseline` with exit code 2 when `scan --recursive` detects one
+  or more child skills, before any report is written. Previously the option was
+  silently ignored. A single-skill scan still accepts it with `--recursive`.
+- [#836](https://github.com/NVIDIA/SkillSpector/pull/836) reports a complete
+  recursive scan whose highest score is MEDIUM (21–50) as CAUTION, matching the
+  child reports, instead of SAFE. Execution failures still report
+  DO_NOT_INSTALL, incomplete analysis still raises SAFE to CAUTION, and exit
+  codes are unchanged.
+- [#837](https://github.com/NVIDIA/SkillSpector/pull/837) stops MP3 from
+  reporting descriptions of a clocked hardware or state-machine "reset state"
+  as memory manipulation, while keeping direct agent-reset instructions. It
+  adds a HIGH MP3 finding for an explicit instruction to treat or adopt
+  (linked) state as the agent's memory or conversation state, unless that
+  instruction is directly prohibited.
+- [#840](https://github.com/NVIDIA/SkillSpector/pull/840) rejects
+  `scan --mcp-registry` combined with `--use-shipped-baseline`, `--transitive`,
+  `--transitive-depth`, `--transitive-allow-prefix` or
+  `--transitive-deny-prefix` with exit code 2, before the registry is read or a
+  report is written. Previously these options were silently ignored.
+
+## Compatibility and remaining limits
+
+Genuine incomplete inspection and independent security findings remain blocking
+signals. A missing-reference advisory is distinct from an uninspected existing
+artifact. This patch does not resolve every parser limitation: nested Markdown
+table cases and references to otherwise inspected ZIP/XLSX containers retain
+their existing limitations. Large worksheets and printer metadata are not
+claimed resolved by the parser or image fixes. The SC8 CPU-budget correction
+from [#828](https://github.com/NVIDIA/SkillSpector/pull/828) is inherited from
+v2.13.0. Downstream admission, semantic-response handling and original customer
+reruns require separate qualification with the paired evaluator artifact.
+
+The bundled-helper check reads only materialized scan inputs. Unsupported,
+ambiguous, missing, cyclic, or over-budget local evidence retains the previous
+parser fallback. External imports and arbitrary interprocedural execution remain
+outside this bounded proof; this release does not claim whole-program analysis.
+
+Report and baseline file output requires POSIX no-follow directory operations.
+On platforms without them, including Windows, `--output` to a file fails before
+analysis: omit `--output` for scan and batch reports, or use
+`skillspector baseline <path> -o -`, and redirect stdout to a new file outside
+the scan target. The parent directory must be writable, and on macOS its
+ancestor directories must also be readable. Report writes follow effective
+filesystem permissions, so a privileged user can replace a read-only report.
+Report files are written with
+owner-only (0600) permissions, including when an existing report is replaced;
+run the Docker image with `--user "$(id -u):$(id -g)"` to read reports it writes
+to a mounted directory. Baselines keep the v2.13.0 rules: new files are private,
+replaced files keep their access metadata, and updates that would need an
+in-place write are refused.
+
+In this release, when `scan --recursive` refuses or fails to write its combined
+report, it exits with code 1 and an error traceback rather than code 2; the
+destination is still not written through. Single-skill scans, `baseline` and the
+batch scanner exit with code 2 in that case.
+
+The gap-fill change in #797 applies to the contributed batch scanner in
+`contrib/batch_scan`, which is not packaged in the wheel.
+
+Two option combinations that v2.13.0 accepted and silently ignored now exit
+with code 2 before a report is written. `scan --mcp-registry` rejects
+`--use-shipped-baseline` and every `--transitive*` option, including an explicit
+`--transitive-depth 1`; omit these options for registry scans.
+`scan --recursive` rejects `--use-shipped-baseline` when it detects one or more
+child skills; scan each sub-skill separately with `--use-shipped-baseline`.
+Update scripts that pass these combinations.
+
+A complete recursive scan whose highest score is 21–50 now reports CAUTION in
+the JSON `risk_recommendation` field and in the SARIF aggregate run's
+`riskAssessment.recommendation`, where v2.13.0 reported SAFE. Automation
+that gates on the recursive recommendation may now stop on these collections.
+Exit codes are unchanged: such a scan still exits 0 unless a strict option
+applies. Markdown and terminal output for complete recursive scans is
+unchanged.
+
+Detection changes in #820 and #837 can change findings and scores. TM1 no
+longer reports a `shell=` flag that a repeated assignment provably leaves false.
+MP3 no longer reports clocked hardware reset-state descriptions, but now reports
+instructions such as "Treat this state as your memory." as HIGH: a skill whose
+only finding is that instruction scores 21 (MEDIUM, CAUTION), where v2.13.0
+reported 0 (SAFE).
+
+Exact, version-bound finding baselines must be regenerated and reviewed for
+2.13.1; do not relabel a baseline from another scanner version. Consumers should
+validate the published wheel against their original inputs and baseline before
+activating the upgrade.
+
+Merging a release PR into `yashraj/v2.13.0-base` with the `release:publish` label
+already present triggers the existing workflow to publish the GitHub `v2.13.1`
+release with wheel and source-distribution assets. Without that label, merging
+does not publish a release. This workflow does not publish to PyPI.

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import heapq
 import posixpath
 import re
@@ -15,6 +16,8 @@ from io import StringIO
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit
 
+import yaml
+
 from skillspector.artifacts import ArtifactDisposition, BundleReference, ReferenceKind
 
 MAX_REFERENCE_SOURCE_BYTES = 1_000_000
@@ -22,6 +25,7 @@ MAX_RAW_REFERENCE_CANDIDATES = 4096
 MAX_ACCEPTED_REFERENCES = 256
 MAX_REFERENCE_RECORDS = 1024
 MAX_REFERENCE_RUNTIME_SECONDS = 2.0
+_MAX_VERSION_FRONTMATTER_CHARS = 64 * 1024
 _MAX_EVIDENCE = 160
 _MAX_MARKDOWN_DESTINATION_CHARS = 512
 _MARKDOWN_REFERENCE_START = re.compile(
@@ -43,8 +47,22 @@ _HTML_CONTEXT_START = re.compile(
     r"<!--|<\?|<!\[CDATA\[|<![A-Z]|</?([A-Za-z][A-Za-z0-9-]*)(?=[\s/>])",
     re.IGNORECASE,
 )
+_FRONTMATTER_VERSION = re.compile(
+    r"""^[ \t]*(?:version|'version'|"version"):[ \t]*(['"])"""
+    r"(?P<version>v?[0-9]+(?:\.[0-9]+)+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)"
+    r"\1(?=[ \t]*(?:#|\r?$))"
+)
 _QUOTED_OR_CODE_PATH = re.compile(
     r"(?:`|'|\")((?:\./)?(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,12})(?:`|'|\")"
+)
+# A declaration is a complete documentation line, not a command operand or a
+# claim inferred from nearby natural-language instructions. Keep the initial
+# grammar intentionally smaller than Markdown's general inline-code grammar.
+_DOCUMENTATION_IMAGE_DECLARATION = re.compile(
+    r"(?:Asset|Image|Illustration|Diagram|Figure|Screenshot|Photo|Picture)"
+    r":[ \t]+`((?:\./)?(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:png|jpg|jpeg))`"
+    r"\.?[ \t]*",
+    re.IGNORECASE,
 )
 # An interpreter command is an explicit path signal, but only its immediate
 # script operand is eligible.  Searching the rest of the code span would turn
@@ -54,6 +72,64 @@ _INLINE_CODE_COMMAND_PATH = re.compile(
     r"pwsh|powershell)\b[ \t]+"
     r"((?:\./)?(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+)(?![\w/.-])"
 )
+_DOTTED_IDENTIFIER = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+", re.ASCII)
+_DATA_FIELD_PREFIX = re.compile(
+    r"(?:(?:Use|Inspect|Read|Check)[ \t\r\n]+)?(?:the[ \t\r\n]+|a[ \t\r\n]+)?"
+    r"(?:(?:configuration|config|object|record)[ \t\r\n]+)?"
+    r"(?:field|property|key|selector):?",
+    re.IGNORECASE,
+)
+_DATA_FIELD_READ_PREFIX = re.compile(
+    r"(?:Use|Inspect|Read|Check)(?:[ \t\r\n]+(?:the|a))?|The", re.IGNORECASE
+)
+_DATA_FIELD_SUFFIX = re.compile(
+    r"[ \t\r\n]+(?:"
+    r"(?:field|property|key|selector)\b|"
+    r"from[ \t\r\n]+(?:the[ \t\r\n]+)?(?:live[ \t\r\n]+)?"
+    r"(?:catalog|record|object|configuration)[ \t\r\n]+(?:data|evidence|values)\b)",
+    re.IGNORECASE,
+)
+_DATA_FIELD_SCALAR_SUFFIX = re.compile(
+    r"[ \t\r\n]+carries[ \t\r\n]+(?:the|a)[ \t\r\n]+"
+    r"(?:[A-Za-z][A-Za-z_-]{0,31}[ \t\r\n]+)?(?:identity|value)\b",
+    re.IGNORECASE,
+)
+_DATA_FIELD_CLAUSE_END = re.compile(r"[;!?]|\.[ \t\r\n]|\r?\n[ \t]*\r?\n")
+_DATA_FIELD_FILE_CONTEXT = re.compile(
+    r"\b(?:files?|filenames?|paths?|directories|directory|scripts?|commands?|"
+    r"run|execute|source|open|load|import|include|download|upload|copy|move|delete|"
+    r"cat|less|more|head|tail|grep|sed|awk|bash|sh|zsh|python\d*|node|perl|ruby|"
+    r"curl|wget|chmod|cp|mv|rm)\b|[$|&<>\\]",
+    re.IGNORECASE,
+)
+
+
+def _is_documented_data_field(text: str, start: int, end: int) -> bool:
+    """Recognize bounded, adjacent prose about a scalar rather than an artifact."""
+    if end - start > 128 or _DOTTED_IDENTIFIER.fullmatch(text, start, end) is None:
+        return False
+    if (
+        start < 1
+        or end >= len(text)
+        or text[start - 1] != "`"
+        or text[end] != "`"
+        or (start > 1 and text[start - 2] in "`\\")
+        or (end + 1 < len(text) and text[end + 1] == "`")
+    ):
+        return False
+    context_start = max(0, start - 161)
+    clauses = _DATA_FIELD_CLAUSE_END.split(text[context_start : start - 1])
+    if context_start and len(clauses) == 1:
+        return False
+    before = clauses[-1].strip()
+    after = _DATA_FIELD_CLAUSE_END.split(text[end + 1 : end + 161], maxsplit=1)[0]
+    if _DATA_FIELD_FILE_CONTEXT.search(before) or _DATA_FIELD_FILE_CONTEXT.search(after):
+        return False
+    return bool(
+        _DATA_FIELD_PREFIX.fullmatch(before)
+        or (_DATA_FIELD_READ_PREFIX.fullmatch(before) and _DATA_FIELD_SUFFIX.match(after))
+        or (before.lower() in {"only", "the"} and _DATA_FIELD_SCALAR_SUFFIX.match(after))
+    )
 
 
 @dataclass(frozen=True)
@@ -269,12 +345,54 @@ def _html_context_end(match: re.Match[str]) -> re.Pattern[str] | None:
     return None
 
 
+def _quoted_frontmatter_scalars(
+    text: str, *, deadline: float, clock: Callable[[], float]
+) -> set[tuple[int, int]]:
+    """Locate real quoted YAML scalars, conservatively retaining refs on failure.
+
+    Parse events rather than constructing YAML objects or expanding aliases.
+    The optional metadata exemption has bounded input, events, and runtime;
+    unsupported/oversized frontmatter keeps normal reference accounting.
+    """
+    if not text.startswith("---\n") and not text.startswith("---\r\n"):
+        return set()
+    prefix = text[:_MAX_VERSION_FRONTMATTER_CHARS]
+    closing = re.search(r"^---[ \t]*\r?$", prefix[4:], re.MULTILINE)
+    if closing is None:
+        return set()
+    frontmatter = prefix[: closing.start() + 4]
+    # Every eligible version field contains this literal; other headers cannot
+    # produce an exemption and need no additional YAML parsing.
+    if "version" not in frontmatter:
+        return set()
+    spans: set[tuple[int, int]] = set()
+    events = yaml.parse(frontmatter)
+    try:
+        for count, event in enumerate(events, 1):
+            if count >= MAX_RAW_REFERENCE_CANDIDATES or clock() >= deadline:
+                return set()
+            if (
+                isinstance(event, yaml.ScalarEvent)
+                and event.style in {"'", '"'}
+                and event.start_mark.line == event.end_mark.line
+            ):
+                # YAML recognizes more line separators than StringIO. Absolute
+                # offsets bind the exemption to the same source characters.
+                spans.add((event.start_mark.index + 1, event.end_mark.index - 1))
+    except yaml.YAMLError:
+        return set()
+    finally:
+        events.close()
+    return spans
+
+
 def _candidate_strings(
     text: str,
     *,
     deadline: float,
     clock: Callable[[], float],
-) -> tuple[list[tuple[str, int, int, str, ReferenceKind]], tuple[str, ...]]:
+    corroborate_images: bool = False,
+) -> tuple[list[tuple[str, int, int, str, ReferenceKind, bool]], tuple[str, ...]]:
     """Extract path-like strings without materializing all matches or lines.
 
     Each candidate iterator contributes at most one pending match to a small
@@ -282,17 +400,34 @@ def _candidate_strings(
     attacker-controlled line cannot be fully enumerated and sorted before the
     candidate and time ceilings are enforced.
     """
-    candidates: list[tuple[str, int, int, str, ReferenceKind]] = []
+    candidates: list[tuple[str, int, int, str, ReferenceKind, bool]] = []
     limitations: set[str] = set()
     seen: set[tuple[int, int, str]] = set()
     active_fence: tuple[str, int, int, int] | None = None
     in_html = False
     html_end: re.Pattern[str] | None = None
     inline_code_delimiter: int | None = None
+    quoted_scalars = _quoted_frontmatter_scalars(text, deadline=deadline, clock=clock)
+    line_offset = 0
+    in_frontmatter = False
+    previous_line_blank = True
+    source_offset = 0
     for line_number, line in enumerate(StringIO(text), 1):
         if clock() >= deadline:
             return candidates, ("runtime",)
         stripped_line = line.rstrip("\r\n")
+        version_match = _FRONTMATTER_VERSION.match(stripped_line) if quoted_scalars else None
+        source_offset += len(line)
+        following_line_blank = source_offset == len(text) or bool(
+            re.match(r"[ \t]{0,3}(?:\r?\n|\Z)", text[source_offset : source_offset + 5])
+        )
+        line_in_frontmatter = in_frontmatter
+        frontmatter_marker = stripped_line.strip(" \t")
+        if line_number == 1 and frontmatter_marker.removeprefix("\ufeff").strip(" \t") == "---":
+            in_frontmatter = line_in_frontmatter = True
+        elif in_frontmatter and frontmatter_marker in {"---", "..."}:
+            in_frontmatter = False
+        line_started_in_inline_code = inline_code_delimiter is not None
         block_line, quote_depth, has_list, prefix_width = _markdown_block_view(stripped_line)
         fence_match = _MARKDOWN_FENCE.fullmatch(block_line)
         line_in_fence = active_fence is not None
@@ -340,6 +475,20 @@ def _candidate_strings(
                 in_html = False
                 html_end = None
         cleaned_line = " ".join(line.strip().split())
+        declaration = (
+            _DOCUMENTATION_IMAGE_DECLARATION.fullmatch(stripped_line)
+            if len(stripped_line) <= _MAX_MARKDOWN_DESTINATION_CHARS
+            and previous_line_blank
+            and following_line_blank
+            and not line_in_frontmatter
+            and not line_in_fence
+            and not line_is_indented_code
+            and not line_in_html
+            and not line_started_in_inline_code
+            and not quote_depth
+            and not has_list
+            else None
+        )
         iterators = [
             _markdown_candidates(line, deadline=deadline, clock=clock, limitations=limitations),
             _pattern_candidates(_INLINE_CODE_COMMAND_PATH, line, ReferenceKind.INLINE_COMMAND),
@@ -361,13 +510,22 @@ def _candidate_strings(
                 return candidates, ("runtime",)
             sort_start, pattern_index, match = heapq.heappop(pending)
             reference_kind = match.kind
+            if (
+                reference_kind is ReferenceKind.QUOTED_OR_CODE
+                and declaration is not None
+                and match.start == declaration.start(1)
+                and match.end == declaration.end(1)
+                and match.raw == declaration.group(1)
+            ):
+                reference_kind = ReferenceKind.DOCUMENTATION_IMAGE
             if not line_in_fence and not line_is_indented_code and not line_in_html:
                 inline_code_cursor, inline_code_delimiter = _advance_inline_code_state(
                     line, sort_start, inline_code_cursor, inline_code_delimiter
                 )
             if reference_kind is ReferenceKind.MARKDOWN_IMAGE:
                 if (
-                    line_in_fence
+                    (corroborate_images and line_in_frontmatter)
+                    or line_in_fence
                     or line_is_indented_code
                     or line_in_html
                     or inline_code_delimiter is not None
@@ -395,7 +553,16 @@ def _candidate_strings(
             )
             if pattern_index == 0:
                 markdown_destination_span = (match.start, match.end)
-            if not inside_destination and not redundant_image_label:
+            # Only the quoted scalar of a frontmatter version field is metadata.
+            # Numeric filenames elsewhere (including explicit Markdown links)
+            # must retain normal missing/resolved reference accounting.
+            is_version_metadata = (
+                reference_kind is ReferenceKind.QUOTED_OR_CODE
+                and version_match is not None
+                and (match.start, match.end) == version_match.span("version")
+                and (line_offset + match.start, line_offset + match.end) in quoted_scalars
+            )
+            if not inside_destination and not redundant_image_label and not is_version_metadata:
                 key = (line_number, match.start, raw)
                 if key not in seen:
                     seen.add(key)
@@ -406,6 +573,15 @@ def _candidate_strings(
                             match.start + 1,
                             _evidence(cleaned_line, match.start + 1),
                             reference_kind,
+                            reference_kind is ReferenceKind.QUOTED_OR_CODE
+                            and not line_in_frontmatter
+                            and not line_in_fence
+                            and not line_is_indented_code
+                            and not line_in_html
+                            and inline_code_delimiter == 1
+                            and _is_documented_data_field(
+                                text, line_offset + match.start, line_offset + match.end
+                            ),
                         )
                     )
                     if len(candidates) >= MAX_RAW_REFERENCE_CANDIDATES:
@@ -422,6 +598,8 @@ def _candidate_strings(
             )
         if closes_fence:
             active_fence = None
+        line_offset += len(line)
+        previous_line_blank = not stripped_line.strip()
     return candidates, tuple(sorted(limitations))
 
 
@@ -443,6 +621,53 @@ def _normalize_candidate(raw: str, source_path: str) -> str | None:
     if joined in {"", ".", ".."} or joined.startswith("../"):
         return None
     return joined.removeprefix("./")
+
+
+def documentation_image_provenance(
+    source_path: str,
+    source_bytes: bytes,
+    *,
+    deadline: float,
+    clock: Callable[[], float] = time.monotonic,
+) -> tuple[str, frozenset[tuple[int, int, str, str]]] | None:
+    """Reconstruct passive image identities from bounded canonical source bytes.
+
+    No filesystem reads or basename inference are performed. A truncated source
+    or extraction cannot establish that all uses of an asset were observed.
+    Callers cache this result per source and share an aggregate time/byte budget.
+    """
+    if len(source_bytes) > MAX_REFERENCE_SOURCE_BYTES or clock() >= deadline:
+        return None
+    try:
+        source = source_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    candidates, limitations = _candidate_strings(
+        source, deadline=deadline, clock=clock, corroborate_images=True
+    )
+    if limitations or clock() >= deadline:
+        return None
+    identities = set()
+    non_passive_targets: set[str] = set()
+    non_passive_basenames: set[str] = set()
+    for raw, line, column, _evidence_text, kind, _is_data_field in candidates:
+        target = _normalize_candidate(raw, source_path)
+        if kind in {ReferenceKind.DOCUMENTATION_IMAGE, ReferenceKind.MARKDOWN_IMAGE}:
+            if target is not None:
+                identities.add((line, column, target, str(kind)))
+        elif target is not None:
+            non_passive_targets.add(target)
+            if "/" not in unquote(raw).replace("\\", "/"):
+                # The public resolver may resolve a unique basename elsewhere
+                # in the inventory. Do not let a missing/altered public record
+                # hide that independent ambiguous or executable use.
+                non_passive_basenames.add(PurePosixPath(target).name)
+    return hashlib.sha256(source_bytes).hexdigest(), frozenset(
+        identity
+        for identity in identities
+        if identity[2] not in non_passive_targets
+        and PurePosixPath(identity[2]).name not in non_passive_basenames
+    )
 
 
 def resolve_bundle_references_with_metadata(
@@ -495,8 +720,9 @@ def resolve_bundle_references_with_metadata(
     limitations = ["input_bytes"] if input_limited else []
     limitations.extend(candidate_limitations)
     records: list[BundleReference] = []
+    source_sha256: str | None = None
     accepted_keys: set[tuple[str, str]] = set()
-    for raw, line, column, evidence, reference_kind in candidates:
+    for raw, line, column, evidence, reference_kind, is_data_field in candidates:
         if clock() > effective_deadline:
             limitations.append("runtime")
             break
@@ -528,6 +754,10 @@ def resolve_bundle_references_with_metadata(
             else:
                 status = "missing"
                 disposition = ArtifactDisposition.PARTIAL
+        # Real inventory matches (including ambiguity) always take precedence
+        # over prose. An independent file use of the same token stays a record.
+        if status == "missing" and is_data_field:
+            continue
         if status != "rejected":
             accepted_key = (status, resolved_target or target or raw)
             if accepted_key not in accepted_keys:
@@ -550,6 +780,15 @@ def resolve_bundle_references_with_metadata(
                 "reference_kind": reference_kind,
             }
         )
+        needs_provenance = reference_kind is ReferenceKind.DOCUMENTATION_IMAGE or (
+            reference_kind is ReferenceKind.MARKDOWN_IMAGE
+            and resolved_target is not None
+            and PurePosixPath(resolved_target).suffix.lower() in {".jpg", ".jpeg"}
+        )
+        if needs_provenance and not input_limited:
+            if source_sha256 is None:
+                source_sha256 = hashlib.sha256(encoded_prefix).hexdigest()
+            records[-1]["source_sha256"] = source_sha256
     stable_limitations = tuple(dict.fromkeys(limitations))
     runtime_seconds = max(0.0, clock() - started_at)
     if runtime_seconds >= runtime_limit and "runtime" not in stable_limitations:
